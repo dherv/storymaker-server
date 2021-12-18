@@ -11,6 +11,7 @@ struct Page {
 #[derive(Deserialize, Serialize, Debug)]
 struct Novel {
     id: Uuid,
+    title: String,
     pages: Vec<Vec<String>>,
 }
 
