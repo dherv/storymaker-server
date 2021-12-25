@@ -1,10 +1,11 @@
 extern crate dotenv;
 extern crate r2d2;
 extern crate r2d2_mysql;
+extern crate regex;
 use actix_cors::Cors;
 use actix_multipart::Multipart;
 use actix_web::{
-    http, middleware,
+    middleware,
     web::{self},
     App, Error, HttpResponse, HttpServer, Responder, Result,
 };
@@ -42,6 +43,9 @@ struct NovelRow {
 }
 
 async fn get_all() -> Result<impl Responder> {
+    // read metadata
+    // get file by name in DB
+    // build the json with DB + text + pages
     let paths = fs::read_dir("./novels/json").unwrap();
     let novels: Vec<Novel> = paths
         .map(|path| fs::read_to_string(path.as_ref().unwrap().path().display().to_string()))
@@ -87,7 +91,15 @@ async fn get_one_page(info: web::Path<Info>) -> Result<impl Responder> {
     let page = pages[index].clone();
     Ok(web::Json(page))
 }
+#[inline]
+fn is_whitespace(c: &u8) -> bool {
+    *c == b' ' || *c == b'\t' || *c == b'\n'
+}
 
+#[inline]
+fn is_not_empty(s: &&[u8]) -> bool {
+    !s.is_empty()
+}
 async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<HttpResponse, Error> {
     // iterate over multipart stream
     let mut form_data = HashMap::new();
@@ -120,8 +132,17 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
                 // Field in turn is stream of *Bytes* object
                 while let Some(chunk) = field.try_next().await? {
                     // filesystem operations are blocking, we have to use threadpool
+                    let mut count = 0;
+                    for _ in chunk.split(is_whitespace).filter(is_not_empty) {
+                        count += 1;
+                        continue;
+                    }
+                    form_data.insert(String::from("word_count"), count.to_string());
                     f = web::block(move || f.write_all(&chunk).map(|_| f)).await?;
                 }
+
+                // GET WORD COUNT and store in hashmap
+                // GET PAGE COUNT and store in hashmap
             }
             _ => println!(
                 "this key is not covered in the match pattern, please add it - {}",
@@ -133,14 +154,17 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
     let res = web::block(move || {
         let mut conn = pool.get().expect("could not connect to the db pool");
         let uuid = format!("{}", uuid::Uuid::new_v4());
+
+        println!("{:?}", form_data.get("word_count").unwrap().parse::<i32>());
         conn.exec_drop(
-            r"INSERT INTO novel (uuid, title, category, filename, synopsis) VALUES (:uuid, :title, :category, :filename, :synopsis)",
+            r"INSERT INTO novel (uuid, title, category, filename, synopsis, word_count) VALUES (:uuid, :title, :category, :filename, :synopsis, :word_count)",
             params! {
                 "uuid" => &uuid,
                 "title" => form_data.get("title").unwrap(),
                 "category" => form_data.get("category").unwrap(),
                 "filename" => form_data.get("filename").unwrap(),
                 "synopsis" => form_data.get("synopsis").unwrap(),
+                "word_count" => form_data.get("word_count").unwrap().parse::<i32>().unwrap(),
             },
         )
         .unwrap();
@@ -175,7 +199,7 @@ async fn main() -> std::io::Result<()> {
             category VARCHAR(255) NOT NULL,
             filename VARCHAR(255) NOT NULL,
             page_count TINYINT NOT NULL DEFAULT 0,
-            word_count TINYINT NOT NULL DEFAULT 0,
+            word_count BIGINT NOT NULL DEFAULT 0,
             view_count TINYINT NOT NULL DEFAULT 0,
             like_count TINYINT NOT NULL DEFAULT 0,
             read_time TINYINT NOT NULL DEFAULT 0,
