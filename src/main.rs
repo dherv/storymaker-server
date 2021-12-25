@@ -54,6 +54,32 @@ async fn get_all() -> Result<impl Responder> {
     Ok(web::Json(novels))
 }
 
+async fn get_all_meta(pool: web::Data<DbPool>) -> Result<impl Responder> {
+    // read metadata
+    // get file by name in DB
+    // build the json with DB + text + pages
+    let res = web::block(move || {
+        let mut conn = pool.get().expect("could not connect to the db pool");
+
+        conn.query_map(r"SELECT * FROM novel", |mut row: Row| {
+            // TODO: use ::new to create the NovelRow
+            NovelRow { 
+                id: row.take("id").unwrap(),  
+                uuid: row.take("uuid").unwrap(), 
+                category: row.take("category").unwrap(), 
+                title: row.take("title").unwrap(),
+                filename: row.take("filename").unwrap(), 
+                synopsis: row.take("synopsis").unwrap()
+            }
+        })
+    })
+    .await
+    .map(|novel| HttpResponse::Ok().json(novel))
+    .map_err(|_| HttpResponse::InternalServerError())?;
+    Ok(res)
+
+}
+
 async fn get_one(id: web::Path<String>) -> Result<impl Responder> {
     let paths = fs::read_dir("./novels/json").unwrap();
     let result_path: Result<std::string::String, std::io::Error> = paths
@@ -91,6 +117,7 @@ async fn get_one_page(info: web::Path<Info>) -> Result<impl Responder> {
     let page = pages[index].clone();
     Ok(web::Json(page))
 }
+
 #[inline]
 fn is_whitespace(c: &u8) -> bool {
     *c == b' ' || *c == b'\t' || *c == b'\n'
@@ -123,8 +150,11 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
             }
             "file" => {
                 let filename = content_disposition.get_filename().unwrap().to_string();
-                let filepath = format!("./novels/{}", filename);
+                let uuid = format!("{}", uuid::Uuid::new_v4());
+                let filepath = format!("./novels/{}", &uuid);
+                
                 form_data.insert(String::from("filename"), filename);
+                form_data.insert(String::from("uuid"), uuid);
 
                 // File::create is blocking operation, use threadpool
                 let mut f = web::block(|| std::fs::File::create(filepath)).await?;
@@ -142,7 +172,7 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
                 }
 
                 // GET WORD COUNT and store in hashmap
-                // GET PAGE COUNT and store in hashmap
+                // GET PAGE COUNT and store in hashmap assuming font size 12 = 250 words on kindle
             }
             _ => println!(
                 "this key is not covered in the match pattern, please add it - {}",
@@ -153,13 +183,12 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
 
     let res = web::block(move || {
         let mut conn = pool.get().expect("could not connect to the db pool");
-        let uuid = format!("{}", uuid::Uuid::new_v4());
 
         println!("{:?}", form_data.get("word_count").unwrap().parse::<i32>());
         conn.exec_drop(
             r"INSERT INTO novel (uuid, title, category, filename, synopsis, word_count) VALUES (:uuid, :title, :category, :filename, :synopsis, :word_count)",
             params! {
-                "uuid" => &uuid,
+                "uuid" => form_data.get("uuid").unwrap(),
                 "title" => form_data.get("title").unwrap(),
                 "category" => form_data.get("category").unwrap(),
                 "filename" => form_data.get("filename").unwrap(),
@@ -169,13 +198,20 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
         )
         .unwrap();
 
-        conn.exec_map(r"SELECT * FROM novel WHERE uuid=:uuid", params! { "uuid" => &uuid }, |r: Row| {
-            let mut row = r.clone();
-            NovelRow { id: row.take("id").unwrap(),  uuid: row.take("uuid").unwrap(), category: row.take("category").unwrap(), title: row.take("title").unwrap(), filename: row.take("filename").unwrap(), synopsis: row.take("synopsis").unwrap()}
+        conn.exec_map(r"SELECT * FROM novel WHERE uuid=:uuid", params! { "uuid" => form_data.get("uuid").unwrap() }, |mut row: Row| {
+            // TODO: use ::new to create the NovelRow
+            NovelRow { 
+                id: row.take("id").unwrap(),  
+                uuid: row.take("uuid").unwrap(), 
+                category: row.take("category").unwrap(), 
+                title: row.take("title").unwrap(),
+                filename: row.take("filename").unwrap(), 
+                synopsis: row.take("synopsis").unwrap()
+            }
         })
     })
     .await
-    .map(|user| HttpResponse::Ok().json(user))
+    .map(|novel| HttpResponse::Ok().json(novel))
     .map_err(|_| HttpResponse::InternalServerError())?;
     Ok(res)
 }
@@ -198,11 +234,11 @@ async fn main() -> std::io::Result<()> {
             title VARCHAR(255) NOT NULL,
             category VARCHAR(255) NOT NULL,
             filename VARCHAR(255) NOT NULL,
-            page_count TINYINT NOT NULL DEFAULT 0,
-            word_count BIGINT NOT NULL DEFAULT 0,
-            view_count TINYINT NOT NULL DEFAULT 0,
-            like_count TINYINT NOT NULL DEFAULT 0,
-            read_time TINYINT NOT NULL DEFAULT 0,
+            page_count MEDIUMINT UNSIGNED NOT NULL DEFAULT 0,
+            word_count INT UNSIGNED NOT NULL DEFAULT 0,
+            view_count MEDIUMINT NOT NULL DEFAULT 0,
+            like_count MEDIUMINT NOT NULL DEFAULT 0,
+            read_time MEDIUMINT NOT NULL DEFAULT 0,
             synopsis TEXT,
             published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -221,6 +257,7 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/api")
                     .route("/", web::get().to(get_all))
+                    .route("/meta", web::get().to(get_all_meta))
                     .route("/{id}", web::get().to(get_one))
                     .route("/{id}/page/{page}", web::get().to(get_one_page))
                     .route("/admin/upload", web::post().to(save_file)),
