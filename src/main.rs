@@ -12,6 +12,7 @@ use mysql::{params, prelude::Queryable, Row};
 use mysql::{Opts, OptsBuilder};
 use r2d2_mysql::MysqlConnectionManager;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{env, fs, io::Write};
 use uuid::Uuid;
 
@@ -37,6 +38,7 @@ struct NovelRow {
     title: String,
     category: String,
     filename: String,
+    synopsis: String,
 }
 
 async fn get_all() -> Result<impl Responder> {
@@ -85,38 +87,32 @@ async fn get_one_page(info: web::Path<Info>) -> Result<impl Responder> {
     let page = pages[index].clone();
     Ok(web::Json(page))
 }
-#[derive(Clone)]
-struct FormData {
-    title: Option<String>,
-    category: Option<String>,
-    filename: Option<String>,
-}
-
-impl FormData {
-    fn new() -> FormData {
-        FormData {
-            title: None,
-            category: None,
-            filename: None,
-        }
-    }
-}
 
 async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<HttpResponse, Error> {
     // iterate over multipart stream
-    let mut form_data = FormData::new();
+    let mut form_data = HashMap::new();
+
     while let Some(mut field) = payload.try_next().await? {
         // A multipart/form-data stream has to contain `content_disposition`
         let content_disposition = field
             .content_disposition()
             .ok_or_else(|| HttpResponse::BadRequest().finish())?;
 
-        let filename = content_disposition.get_filename();
+        let name = content_disposition.get_name().unwrap().to_string();
 
-        match filename {
-            Some(name) => {
-                form_data.filename = Some(name.to_string());
-                let filepath = format!("./novels/{}", name);
+        match name.as_str() {
+            "title" | "category" | "synopsis" => {
+                while let Some(chunk) = field.next().await {
+                    form_data.insert(
+                        name.to_string(),
+                        std::str::from_utf8(&chunk?).unwrap().to_string(),
+                    );
+                }
+            }
+            "file" => {
+                let filename = content_disposition.get_filename().unwrap().to_string();
+                let filepath = format!("./novels/{}", filename);
+                form_data.insert(String::from("filename"), filename);
 
                 // File::create is blocking operation, use threadpool
                 let mut f = web::block(|| std::fs::File::create(filepath)).await?;
@@ -127,29 +123,10 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
                     f = web::block(move || f.write_all(&chunk).map(|_| f)).await?;
                 }
             }
-            None => {
-                let name = content_disposition.get_name().unwrap();
-                while let Some(chunk) = field.next().await {
-                    // TODO: check if it is okay to just read chunk here, since we await for it.
-                    // it populate each field at a time
-                    // println!("-- CHUNK: \n{:?}", std::str::from_utf8(&chunk?));
-                    match std::str::from_utf8(&chunk?) {
-                        Ok(c) => {
-                            println!("result, {:?}, {:?}", name, c);
-                            if name == "title" {
-                                form_data.title = Some(c.to_string());
-                            }
-                            if name == "category" {
-                                form_data.category = Some(c.to_string());
-                            }
-                        }
-                        Err(err) => {
-                            println!("err: {:?}", err)
-                        }
-                    }
-                    // name - chunk in mysql
-                }
-            }
+            _ => println!(
+                "this key is not covered in the match pattern, please add it - {}",
+                name
+            ),
         }
     }
 
@@ -157,19 +134,20 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
         let mut conn = pool.get().expect("could not connect to the db pool");
         let uuid = format!("{}", uuid::Uuid::new_v4());
         conn.exec_drop(
-            r"INSERT INTO novel (uuid, title, category, filename) VALUES (:uuid, :title, :category, :filename)",
+            r"INSERT INTO novel (uuid, title, category, filename, synopsis) VALUES (:uuid, :title, :category, :filename, :synopsis)",
             params! {
                 "uuid" => &uuid,
-                "title" => form_data.title.unwrap(),
-                "category" => form_data.category.unwrap(),
-                "filename" => form_data.filename.unwrap(),
+                "title" => form_data.get("title").unwrap(),
+                "category" => form_data.get("category").unwrap(),
+                "filename" => form_data.get("filename").unwrap(),
+                "synopsis" => form_data.get("synopsis").unwrap(),
             },
         )
         .unwrap();
 
         conn.exec_map(r"SELECT * FROM novel WHERE uuid=:uuid", params! { "uuid" => &uuid }, |r: Row| {
             let mut row = r.clone();
-            NovelRow { id: row.take("id").unwrap(),  uuid: row.take("uuid").unwrap(), category: row.take("category").unwrap(), title: row.take("title").unwrap(), filename: row.take("filename").unwrap()}
+            NovelRow { id: row.take("id").unwrap(),  uuid: row.take("uuid").unwrap(), category: row.take("category").unwrap(), title: row.take("title").unwrap(), filename: row.take("filename").unwrap(), synopsis: row.take("synopsis").unwrap()}
         })
     })
     .await
