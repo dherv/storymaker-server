@@ -1,12 +1,14 @@
 extern crate dotenv;
 extern crate r2d2;
 extern crate r2d2_mysql;
+use actix_cors::Cors;
 use actix_multipart::Multipart;
 use actix_web::{
-    middleware,
+    http, middleware,
     web::{self},
     App, Error, HttpResponse, HttpServer, Responder, Result,
 };
+use dotenv::dotenv;
 use futures_util::{StreamExt, TryStreamExt};
 use mysql::{params, prelude::Queryable, Row};
 use mysql::{Opts, OptsBuilder};
@@ -15,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::{env, fs, io::Write};
 use uuid::Uuid;
-
-use dotenv::dotenv;
 type DbPool = r2d2::Pool<MysqlConnectionManager>;
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -188,8 +188,11 @@ async fn main() -> std::io::Result<()> {
     .expect("could not create the table");
 
     HttpServer::new(move || {
+        let cors = Cors::permissive();
+
         App::new()
             .wrap(middleware::Logger::default())
+            .wrap(cors)
             .data(pool.clone())
             .service(
                 web::scope("/api")
