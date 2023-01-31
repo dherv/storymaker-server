@@ -40,6 +40,8 @@ struct NovelRow {
     category: String,
     filename: String,
     synopsis: String,
+    page_count: usize,
+    word_count: usize
 }
 
 async fn get_all() -> Result<impl Responder> {
@@ -69,7 +71,9 @@ async fn get_all_meta(pool: web::Data<DbPool>) -> Result<impl Responder> {
                 category: row.take("category").unwrap(), 
                 title: row.take("title").unwrap(),
                 filename: row.take("filename").unwrap(), 
-                synopsis: row.take("synopsis").unwrap()
+                synopsis: row.take("synopsis").unwrap(),
+                page_count: row.take("page_count").unwrap(),
+                word_count: row.take("word_count").unwrap(),
             }
         })
     })
@@ -93,7 +97,7 @@ async fn get_one(id: web::Path<String>) -> Result<impl Responder> {
 
 #[derive(Deserialize)]
 struct Info {
-    id: Uuid,
+    id: String,
     page: usize,
 }
 
@@ -102,20 +106,91 @@ struct ErrMessage {
     message: String,
 }
 
-async fn get_one_page(info: web::Path<Info>) -> Result<impl Responder> {
-    let paths = fs::read_dir("./novels/json").unwrap();
-    let result_path: Result<std::string::String, std::io::Error> = paths
-        .map(|path| path.as_ref().unwrap().path().display().to_string())
-        .filter(|path_string| path_string.contains(&info.id.to_string()))
-        .map(|path| fs::read_to_string(path))
-        .collect();
-    let novel: Novel = serde_json::from_str(&result_path.unwrap().to_string())?;
+async fn get_one_page(pool: web::Data<DbPool>, info: web::Path<Info>) -> Result<impl Responder> {
+    // let paths = fs::read_dir("./novels/json").unwrap();
+    // let result_path: Result<std::string::String, std::io::Error> = paths
+    //     .map(|path| path.as_ref().unwrap().path().display().to_string())
+    //     .filter(|path_string| path_string.contains(&info.id.to_string()))
+    //     .map(|path| fs::read_to_string(path))
+    //     .collect();
+    // let novel: Novel = serde_json::from_str(&result_path.unwrap().to_string())?;
 
-    let index = info.page - 1;
-    let pages: Vec<Vec<String>> = novel.pages;
-    // need to clone otherwise will create a reference in current scope and can not be passed to Ok(web::Json(page))
-    let page = pages[index].clone();
-    Ok(web::Json(page))
+    // let index = info.page - 1;
+    // let pages: Vec<Vec<String>> = novel.pages;
+    // // need to clone otherwise will create a reference in current scope and can not be passed to Ok(web::Json(page))
+    // let page = pages[index].clone();
+    // Ok(web::Json(page))
+    let id = info.id.to_string();
+
+    println!("{}", id);
+    let res = web::block(move || {
+       
+        let mut conn = pool.get().expect("could not connect to the db pool");
+
+        conn.exec_map(r"SELECT * FROM novel WHERE uuid=:uuid", params! { "uuid" => id }, |mut row: Row| {
+            println!("{:?}", &row);
+            NovelRow { 
+                id: row.take("id").unwrap(),  
+                uuid: row.take("uuid").unwrap(), 
+                category: row.take("category").unwrap(), 
+                title: row.take("title").unwrap(),
+                filename: row.take("filename").unwrap(), 
+                synopsis: row.take("synopsis").unwrap(),
+                page_count: row.take("page_count").unwrap(),
+                word_count: row.take("word_count").unwrap(),
+            }
+        })
+    })
+    .await?;
+    Ok(HttpResponse::Ok().json(res))
+}
+
+async fn get_one_page_from_db(pool: web::Data<DbPool>, info: web::Path<Info>) -> Result<impl Responder> {
+    let id = info.id.to_string();
+
+    let res = web::block(move || {
+       
+        let mut conn = pool.get().expect("could not connect to the db pool");
+
+        conn.exec_map(r"SELECT * FROM novel WHERE id=:id", params! { "id" => id }, |mut row: Row| {
+            NovelRow { 
+                id: row.take("id").unwrap(),  
+                uuid: row.take("uuid").unwrap(), 
+                category: row.take("category").unwrap(), 
+                title: row.take("title").unwrap(),
+                filename: row.take("filename").unwrap(), 
+                synopsis: row.take("synopsis").unwrap(),
+                page_count: row.take("page_count").unwrap(),
+                word_count: row.take("word_count").unwrap(),
+            }
+        })
+    })
+    .await
+    .map( |novels| {
+  
+                  // GET THE TEXT FILE
+                  let path = format!("./novels/{}", novels[0].uuid);
+                  println!("novels, {:?}", &path);
+                  let text = fs::read_to_string(path).unwrap();
+      
+                  // page 1 = 0 - 249
+                  // page 2 = 250 - 499
+                  // page 3 = 500 - 750 (250 * (page - 1) / 250 * page)
+                  let start_slice = 250 * (&info.page - 1);
+                  let end_slice = 250 * &info.page;
+
+                  println!("{} {}", start_slice, end_slice);
+                  let page_split: Vec<&str> = text.split(|c: char| c == ' ').collect();
+                  let page = page_split[start_slice..end_slice].join(" ");
+
+                  println!("{}", page);
+
+                  // SLICE IT AT START END USING WORDS COUNT and default 250 words per page
+                  HttpResponse::Ok().json(page)
+    } )
+    .map_err(|_| HttpResponse::InternalServerError())?;
+    Ok(res)
+
 }
 
 #[inline]
@@ -184,9 +259,9 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
     let res = web::block(move || {
         let mut conn = pool.get().expect("could not connect to the db pool");
 
-        println!("{:?}", form_data.get("word_count").unwrap().parse::<i32>());
+        println!("{:?}", form_data.get("word_count").unwrap().parse::<i32>().unwrap() / 250);
         conn.exec_drop(
-            r"INSERT INTO novel (uuid, title, category, filename, synopsis, word_count) VALUES (:uuid, :title, :category, :filename, :synopsis, :word_count)",
+            r"INSERT INTO novel (uuid, title, category, filename, synopsis, word_count, page_count) VALUES (:uuid, :title, :category, :filename, :synopsis, :word_count, :page_count)",
             params! {
                 "uuid" => form_data.get("uuid").unwrap(),
                 "title" => form_data.get("title").unwrap(),
@@ -194,6 +269,7 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
                 "filename" => form_data.get("filename").unwrap(),
                 "synopsis" => form_data.get("synopsis").unwrap(),
                 "word_count" => form_data.get("word_count").unwrap().parse::<i32>().unwrap(),
+                "page_count" => form_data.get("word_count").unwrap().parse::<i32>().unwrap() / 250
             },
         )
         .unwrap();
@@ -206,7 +282,9 @@ async fn save_file(pool: web::Data<DbPool>, mut payload: Multipart) -> Result<Ht
                 category: row.take("category").unwrap(), 
                 title: row.take("title").unwrap(),
                 filename: row.take("filename").unwrap(), 
-                synopsis: row.take("synopsis").unwrap()
+                synopsis: row.take("synopsis").unwrap(),
+                page_count: row.take("page_count").unwrap(),
+                word_count: row.take("word_count").unwrap(),
             }
         })
     })
@@ -259,7 +337,8 @@ async fn main() -> std::io::Result<()> {
                     .route("/", web::get().to(get_all))
                     .route("/meta", web::get().to(get_all_meta))
                     .route("/{id}", web::get().to(get_one))
-                    .route("/{id}/page/{page}", web::get().to(get_one_page))
+                    .route("/v1/{id}/page/{page}", web::get().to(get_one_page))
+                    .route("/{id}/page/{page}", web::get().to(get_one_page_from_db))
                     .route("/admin/upload", web::post().to(save_file)),
             )
     })
